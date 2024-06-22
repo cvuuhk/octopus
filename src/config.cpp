@@ -1,13 +1,14 @@
-#include "config.h"
+#include "config.hpp"
 
-Config Config::init(int argc, char **argv) {
+void Config::init(int argc, char* argv[]) {
     // todo: parse arguments
-    Config config = Config();
-    config.listen_port = 8080;
-
-    return config;
+    this->port = 8080;
 }
 
-int Config::get_listen_port() {
-    return this->listen_port;
+int Config::getPort() {
+    return this->port;
+}
+
+Log::LogLevel Config::getLogLevel() {
+    return Log::LogLevel::INFO;
 }
