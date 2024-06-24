@@ -4,9 +4,6 @@
 #include <arpa/inet.h> // inet_pton
 #include <cstring>
 #include <sys/epoll.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <map>
 #include <string>
 
 #include "config.hpp"
@@ -18,6 +15,11 @@ Server::Server(int argc, char* argv[]) {
      this->config.init(argc, argv);
      this->initialized = true;
      this->logger = Log::Logger(this->config.getLogLevel());
+     this->epfd = epoll_create(1);
+     if(this->epfd == -1) {
+         logger.error("error when create epfd: " + std::string(strerror(errno)));
+         exit(1);
+     }
 }
 
 void Server::start() {
@@ -26,68 +28,36 @@ void Server::start() {
     }
 
     listenLocal();
+    addEvent(new AcceptEvent(this->socket_fd, this));
+    eventLoop();
+}
 
-    Event* event = new AcceptEvent(this->socket_fd);
-    std::map<int, Event*> m;
-    m.insert(std::make_pair(this->socket_fd, event));
+void Server::addEvent(Event* event) {
+    Event* savedEvent = this->events[event->getFd()];
 
-    int epfd = epoll_create(1);
-    struct epoll_event* ee = new struct epoll_event;
-    ee->events = EPOLLIN;
-    ee->data.fd = socket_fd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, this->socket_fd, ee);
-
-    int fd_nums;
-    while(true) {
-        struct epoll_event events[5];
-        fd_nums = epoll_wait(epfd, events, 5, -1);
-
-        if (fd_nums == -1) {
-            logger.error("error when epoll_wait: " + std::string(strerror(errno)));
-            exit(1);
-        }
-
-        for (int i=0; i<fd_nums; ++i) {
-            int fd = events[i].data.fd;
-            m.at(fd)->handleEvent();
-        }
+    if (savedEvent != nullptr) {
+        struct epoll_event* ee = savedEvent->getEpollEvent();
+        ee->events = ee->events | event->getMask();
+        epoll_ctl(this->epfd, EPOLL_CTL_MOD, event->getFd(), ee);
+    } else {
+        struct epoll_event* ee = event->getEpollEvent();
+        epoll_ctl(this->epfd, EPOLL_CTL_ADD, event->getFd(), ee);
+        this->events[event->getFd()] = event;
     }
+}
 
-    // struct sockaddr_in accept_addr;
-    // socklen_t accept_len = sizeof(accept_addr);
-    // while (true) {
-    //     int accept_fd = accept(this->socket_fd, (struct sockaddr*)&accept_addr, &accept_len);
-    //     if (accept_fd < 0) {
-    //         logger.error("error when accept");
-    //         exit(1);
-    //     }
+void Server::removeEvent(Event* event) {
+    Event* savedEvent = this->events[event->getFd()];
+    if(savedEvent == nullptr) return;
 
-    //     int flags;
-    //     if ((flags = fcntl(accept_fd, F_GETFL)) == -1) {
-    //         logger.error("error when fcntl(" + std::to_string(accept_fd) + ", F_GETFL)");
-    //     }
-    //     if (fcntl(accept_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-    //         logger.error("error when set O_NONBLOCK " + std::to_string(accept_fd));
-    //     }
-
-    //     int result;
-    //     char buffer[100];
-    //     for (;;) {
-    //         memset(buffer, '\0', 100);
-    //         result = recv(accept_fd, buffer, 99, 0);
-    //         if (result == -1) {
-    //             if (errno == EAGAIN) continue;
-    //             logger.error("error when recv: " + std::string(strerror(errno)));
-    //             exit(result);
-    //         } else if (result == 0) {
-    //             logger.info("client closed connection");
-    //             close(accept_fd);
-    //             break;
-    //         } else {
-    //             std::cout << buffer << std::flush;
-    //         }
-    //     }
-    // }
+    savedEvent->setMask(savedEvent->getMask() & (~event->getMask()));
+    if(savedEvent->getMask() != 0) {
+        epoll_ctl(this->epfd, EPOLL_CTL_MOD, event->getFd(), savedEvent->getEpollEvent());
+    } else {
+        epoll_ctl(this->epfd, EPOLL_CTL_DEL, event->getFd(), nullptr);
+        this->events[event->getFd()] = nullptr;
+        delete savedEvent;
+    }
 }
 
 void Server::listenLocal() {
@@ -119,4 +89,20 @@ void Server::listenLocal() {
     }
 
     logger.info("server started, listening on port " + std::to_string(this->config.getPort()));
+}
+
+void Server::eventLoop() {
+    int fd_nums;
+    while(true) {
+        struct epoll_event events[5];
+        fd_nums = epoll_wait(this->epfd, events, 5, -1);
+
+        if (fd_nums == -1) {
+            logger.error("error when epoll_wait: " + std::string(strerror(errno)));
+            exit(1);
+        }
+
+        for (int i=0; i<fd_nums; ++i)
+            this->events[events[i].data.fd]->handleEvent();
+    }
 }
