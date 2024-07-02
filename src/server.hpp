@@ -9,11 +9,12 @@ class Server {
         Server(int argc, char* argv[]);
         void start();
         void addEvent(Event*);
-        void removeEvent(Event*);
+        void removeEvent(Event*, int mask);
+
+        Log::Logger logger;
     private:
         Config config;
         bool initialized;
-        Log::Logger logger;
         int socket_fd;
         int epfd;
         Event* events[10240];

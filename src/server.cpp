@@ -5,6 +5,7 @@
 #include <cstring>
 #include <sys/epoll.h>
 #include <string>
+#include <unistd.h>
 
 #include "config.hpp"
 #include "server.hpp"
@@ -46,16 +47,17 @@ void Server::addEvent(Event* event) {
     }
 }
 
-void Server::removeEvent(Event* event) {
+void Server::removeEvent(Event* event, int mask) {
     Event* savedEvent = this->events[event->getFd()];
     if(savedEvent == nullptr) return;
 
-    savedEvent->setMask(savedEvent->getMask() & (~event->getMask()));
+    savedEvent->setMask(savedEvent->getMask() & ~mask);
     if(savedEvent->getMask() != 0) {
         epoll_ctl(this->epfd, EPOLL_CTL_MOD, event->getFd(), savedEvent->getEpollEvent());
     } else {
         epoll_ctl(this->epfd, EPOLL_CTL_DEL, event->getFd(), nullptr);
         this->events[event->getFd()] = nullptr;
+        close(event->getFd());
         delete savedEvent;
     }
 }
@@ -89,6 +91,7 @@ void Server::listenLocal() {
     }
 
     logger.info("server started, listening on port " + std::to_string(this->config.getPort()));
+    logger.info("sever socket_fd = " + std::to_string(this->socket_fd));
 }
 
 void Server::eventLoop() {
@@ -98,11 +101,15 @@ void Server::eventLoop() {
         fd_nums = epoll_wait(this->epfd, events, 5, -1);
 
         if (fd_nums == -1) {
+            if (errno == EINTR) continue;
             logger.error("error when epoll_wait: " + std::string(strerror(errno)));
             exit(1);
         }
 
-        for (int i=0; i<fd_nums; ++i)
-            this->events[events[i].data.fd]->handleEvent();
+        for (int i=0; i<fd_nums; ++i) {
+            int mask = events[i].events;
+            if (mask & EPOLLIN) this->events[events[i].data.fd]->doRead();
+            if (mask & EPOLLOUT) this->events[events[i].data.fd]->doWrite();
+        }
     }
 }

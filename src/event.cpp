@@ -13,14 +13,14 @@
 AcceptEvent::AcceptEvent(int fd, Server* server) {
     this->fd = fd;
     this->mask = EPOLLIN;
-    this->epoll_event = new struct epoll_event;
-    this->epoll_event->events = EPOLLIN;
-    this->epoll_event->data.fd = fd;
+    this->epollEvent = new struct epoll_event;
+    this->epollEvent->events = EPOLLIN;
+    this->epollEvent->data.fd = fd;
     this->server = server;
+    this->logger = Log::Logger();
 }
 
-void AcceptEvent::handleEvent() {
-
+void AcceptEvent::doRead() {
     struct sockaddr_in accept_addr;
     socklen_t accept_len = sizeof(accept_addr);
 
@@ -43,78 +43,56 @@ void AcceptEvent::handleEvent() {
     int port = ntohs(accept_addr.sin_port);
 
     logger.info("connected with " + std::string(str) + ":" + std::to_string(port));
-    this->server->addEvent(new ReadEvent(accept_fd));
+    this->server->addEvent(new ClientEvent(accept_fd, this->server));
 }
 
-int AcceptEvent::getFd() {
-    return this->fd;
-}
-
-int AcceptEvent::getMask() {
-    return this->mask;
-}
-
-void AcceptEvent::setMask(int mask) {
-    this->mask = mask;
-    if(this->epoll_event != nullptr) {
-        this->epoll_event->events = mask;
-    }
-}
-
-struct epoll_event* AcceptEvent::getEpollEvent() {
-    return this->epoll_event;
-}
-
-
-ReadEvent::ReadEvent(int fd) {
+ClientEvent::ClientEvent(int fd, Server* server) {
     this->fd = fd;
     this->mask = EPOLLIN;
-    this->epoll_event = new struct epoll_event;
-    this->epoll_event->events = EPOLLIN;
-    this->epoll_event->data.fd = fd;
+    this->epollEvent = new struct epoll_event;
+    this->epollEvent->events = EPOLLIN;
+    this->epollEvent->data.fd = fd;
     this->server = server;
+    this->logger = Log::Logger();
 }
 
-void ReadEvent::handleEvent() {
+ClientEvent::~ClientEvent() {
+    if (this->buffer != nullptr) delete [] this->buffer;
+    // 导致 double free, EPOLL_CTL_DEL 应该是会自己删除 epoll_event 对象
+    // if (this->epollEvent != nullptr) delete this->epollEvent;
+}
+
+void ClientEvent::doRead() {
     struct sockaddr_in accept_addr;
     socklen_t accept_len = sizeof(accept_addr);
+    // todo: protocol read
     while (true) {
         int result;
         char buffer[100];
-        for (;;) {
-            memset(buffer, '\0', 100);
-            result = recv(this->fd, buffer, 99, 0);
-            if (result == -1) {
-                if (errno == EAGAIN) break;
-                // logger.error("error when recv: " + std::string(strerror(errno)));
-                exit(result);
-            } else if (result == 0) {
-                // logger.info("client disconnected")
-                // this->server->removeEvent(this);
-                close(this->fd);
-                break;
-            } else {
-                std::cout << buffer << std::flush;
-            }
+        memset(buffer, '\0', 100);
+        result = recv(this->fd, buffer, 99, 0);
+        if (result == -1) {
+            if (errno == EAGAIN) break;
+            logger.error("error when recv: " + std::string(strerror(errno)));
+            exit(result);
+        } else if (result == 0) {
+            logger.info("client disconnected");
+            this->server->removeEvent(this, EPOLLIN);
+            break;
+        } else {
+            std::cout << buffer << std::flush;
+            char* newBuffer = new char[result+1];
+            for (int i = 0; i <= result; ++i) newBuffer[i] = buffer[i];
+            this->buffer = newBuffer;
+            this->bufferSize = result;
+            this->mask = this->mask | EPOLLOUT;
+            this->epollEvent->events = this->epollEvent->events | EPOLLOUT;
+            this->server->addEvent(this);
         }
     }
 }
 
-int ReadEvent::getFd() {
-    return this->fd;
-}
-
-int ReadEvent::getMask() {
-    return this->mask;
-}
-
-void ReadEvent::setMask(int mask) {
-    this->mask = mask;
-    if(this->epoll_event != nullptr) {
-        this->epoll_event->events = mask;
-    }
-}
-
-struct epoll_event* ReadEvent::getEpollEvent() {
-    return this->epoll_event;
+void ClientEvent::doWrite() {
+    write(this->fd, this->buffer, this->bufferSize);
+    this->server->removeEvent(this, EPOLLOUT);
 }
